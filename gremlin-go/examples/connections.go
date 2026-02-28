@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kiddom/tinkerpop/gremlin-go/v3/driver"
+	"github.com/apache/tinkerpop/gremlin-go/v3/driver"
 )
 
 var serverURL = getEnv("GREMLIN_SERVER_URL", "http://localhost:8182/gremlin")
