@@ -54,6 +54,11 @@ type ClientSettings struct {
 	// Default: 180 seconds (3 minutes). Set to 0 to use the default.
 	IdleConnectionTimeout time.Duration
 
+	// MaxConnectionLifetime is the maximum amount of time a pooled connection can be reused
+	// before it is replaced, regardless of idle/activity state.
+	// Default: disabled (0). Set to 0 to disable.
+	MaxConnectionLifetime time.Duration
+
 	// KeepAliveInterval is the interval between TCP keep-alive probes on idle connections.
 	// This helps detect dead connections and keeps connections alive through firewalls.
 	// Default: 30 seconds. Set to 0 to use the default.
@@ -90,6 +95,7 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		MaximumConcurrentConnections: 0, // Use default (128)
 		MaxIdleConnections:           0, // Use default (8)
 		IdleConnectionTimeout:        0, // Use default (180s)
+		MaxConnectionLifetime:        0, // Disabled
 		KeepAliveInterval:            0, // Use default (30s)
 	}
 	for _, configuration := range configurations {
@@ -102,6 +108,7 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		maxConnsPerHost:          settings.MaximumConcurrentConnections,
 		maxIdleConnsPerHost:      settings.MaxIdleConnections,
 		idleConnTimeout:          settings.IdleConnectionTimeout,
+		maxConnLifetime:          settings.MaxConnectionLifetime,
 		keepAliveInterval:        settings.KeepAliveInterval,
 		enableCompression:        settings.EnableCompression,
 		enableUserAgentOnConnect: settings.EnableUserAgentOnConnect,

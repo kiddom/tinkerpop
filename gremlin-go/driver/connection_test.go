@@ -1045,6 +1045,19 @@ func TestConnectionPoolSettings(t *testing.T) {
 		assert.Equal(t, 8, transport.MaxIdleConnsPerHost, "MaxIdleConnsPerHost should default to 8")
 		assert.Equal(t, 180*time.Second, transport.IdleConnTimeout, "IdleConnTimeout should default to 180s")
 	})
+
+	t.Run("max connection lifetime is disabled by default", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{})
+		assert.Nil(t, conn.stopRefresh)
+	})
+
+	t.Run("max connection lifetime starts refresh loop when configured", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			maxConnLifetime: 100 * time.Millisecond,
+		})
+		require.NotNil(t, conn.stopRefresh)
+		conn.close()
+	})
 }
 
 func TestClientSettingsWiring(t *testing.T) {
@@ -1055,6 +1068,7 @@ func TestClientSettingsWiring(t *testing.T) {
 				settings.MaxIdleConnections = 20
 				settings.IdleConnectionTimeout = 240 * time.Second
 				settings.KeepAliveInterval = 45 * time.Second
+				settings.MaxConnectionLifetime = 3 * time.Minute
 			})
 		require.NoError(t, err)
 		defer client.Close()
@@ -1064,6 +1078,7 @@ func TestClientSettingsWiring(t *testing.T) {
 		assert.Equal(t, 20, client.connectionSettings.maxIdleConnsPerHost)
 		assert.Equal(t, 240*time.Second, client.connectionSettings.idleConnTimeout)
 		assert.Equal(t, 45*time.Second, client.connectionSettings.keepAliveInterval)
+		assert.Equal(t, 3*time.Minute, client.connectionSettings.maxConnLifetime)
 
 		// Verify settings were applied to http.Transport
 		transport := client.conn.httpClient.Transport.(*http.Transport)
@@ -1099,6 +1114,7 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 				settings.MaxIdleConnections = 15
 				settings.IdleConnectionTimeout = 200 * time.Second
 				settings.KeepAliveInterval = 40 * time.Second
+				settings.MaxConnectionLifetime = 2 * time.Minute
 			})
 		require.NoError(t, err)
 		defer drc.Close()
@@ -1108,6 +1124,7 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 		assert.Equal(t, 15, drc.client.connectionSettings.maxIdleConnsPerHost)
 		assert.Equal(t, 200*time.Second, drc.client.connectionSettings.idleConnTimeout)
 		assert.Equal(t, 40*time.Second, drc.client.connectionSettings.keepAliveInterval)
+		assert.Equal(t, 2*time.Minute, drc.client.connectionSettings.maxConnLifetime)
 
 		// Verify settings were applied to http.Transport
 		transport := drc.client.conn.httpClient.Transport.(*http.Transport)
@@ -1126,6 +1143,7 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 		assert.Equal(t, 0, drc.client.connectionSettings.maxIdleConnsPerHost)
 		assert.Equal(t, time.Duration(0), drc.client.connectionSettings.idleConnTimeout)
 		assert.Equal(t, time.Duration(0), drc.client.connectionSettings.keepAliveInterval)
+		assert.Equal(t, time.Duration(0), drc.client.connectionSettings.maxConnLifetime)
 
 		// Verify defaults were applied to http.Transport
 		transport := drc.client.conn.httpClient.Transport.(*http.Transport)
@@ -1133,4 +1151,66 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 		assert.Equal(t, 8, transport.MaxIdleConnsPerHost)
 		assert.Equal(t, 180*time.Second, transport.IdleConnTimeout)
 	})
+}
+
+func TestMaxConnectionLifetime(t *testing.T) {
+	t.Run("swapTransport replaces transport and keeps settings", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			connectionTimeout:   5 * time.Second,
+			maxConnsPerHost:     21,
+			maxIdleConnsPerHost: 7,
+			idleConnTimeout:     11 * time.Second,
+			keepAliveInterval:   3 * time.Second,
+			enableCompression:   true,
+		})
+		defer conn.close()
+
+		original := getConnectionTransport(conn)
+		conn.swapTransport()
+		swapped := getConnectionTransport(conn)
+
+		assert.NotSame(t, original, swapped)
+		assert.Equal(t, original.MaxConnsPerHost, swapped.MaxConnsPerHost)
+		assert.Equal(t, original.MaxIdleConnsPerHost, swapped.MaxIdleConnsPerHost)
+		assert.Equal(t, original.IdleConnTimeout, swapped.IdleConnTimeout)
+		assert.Equal(t, original.DisableCompression, swapped.DisableCompression)
+	})
+
+	t.Run("refresh loop swaps transport over time", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			maxConnLifetime: 50 * time.Millisecond,
+		})
+		defer conn.close()
+
+		original := getConnectionTransport(conn)
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if getConnectionTransport(conn) != original {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("expected transport to swap within timeout")
+	})
+
+	t.Run("close is safe and stops refresh loop", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			maxConnLifetime: 100 * time.Millisecond,
+		})
+
+		assert.NotPanics(t, func() { conn.close() })
+		assert.NotPanics(t, func() { conn.close() })
+
+		select {
+		case <-conn.stopRefresh:
+		case <-time.After(time.Second):
+			t.Fatal("expected stopRefresh channel to be closed")
+		}
+	})
+}
+
+func getConnectionTransport(conn *connection) *http.Transport {
+	conn.transportMu.RLock()
+	defer conn.transportMu.RUnlock()
+	return conn.httpClient.Transport.(*http.Transport)
 }

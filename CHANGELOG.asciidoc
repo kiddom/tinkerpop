@@ -32,6 +32,7 @@ image::https://raw.githubusercontent.com/apache/tinkerpop/master/docs/static/ima
 * Removed obsolete `gremlin-groovy` translation testing: `ParameterizedGroovyTranslatorProvider` and related infrastructure.
 * Replace `Bytecode` with `GremlinLang` & update serialization to GraphBinary 4 for `gremlin-go`
 * Added `RequestInterceptor` to `gremlin-go` with `auth` reference implementations to replace `authInfo`
+* Added `MaxConnectionLifetime` setting to `gremlin-go` `ClientSettings` and `DriverRemoteConnectionSettings` to periodically refresh pooled HTTP transports.
 * Refactored GraphBinary serializers to use `io.Writer` and `io.Reader` instead of `*bytes.Buffer` for streaming capacities
 * Refactored `httpProtocol` and `httpTransport` in `gremlin-go` into single `connection.go` that handles HTTP request and response
 * Bumped SLF4j to 2.0.16.
