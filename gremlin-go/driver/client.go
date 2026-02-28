@@ -21,6 +21,7 @@ package gremlingo
 
 import (
 	"crypto/tls"
+	"net/http"
 	"reflect"
 	"time"
 
@@ -58,6 +59,12 @@ type ClientSettings struct {
 	// This helps detect dead connections and keeps connections alive through firewalls.
 	// Default: 30 seconds. Set to 0 to use the default.
 	KeepAliveInterval time.Duration
+
+	// Transport is an optional custom http.RoundTripper for the underlying HTTP client.
+	// When set, it replaces the default http.Transport entirely — connection pool
+	// settings (MaximumConcurrentConnections, MaxIdleConnections, etc.) are ignored.
+	// Use this to implement custom load balancing, DNS-aware routing, or observability.
+	Transport http.RoundTripper
 
 	EnableUserAgentOnConnect bool
 
@@ -105,6 +112,7 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		keepAliveInterval:        settings.KeepAliveInterval,
 		enableCompression:        settings.EnableCompression,
 		enableUserAgentOnConnect: settings.EnableUserAgentOnConnect,
+		customTransport:          settings.Transport,
 	}
 
 	logHandler := newLogHandler(settings.Logger, settings.LogVerbosity, settings.Language)

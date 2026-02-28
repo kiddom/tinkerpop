@@ -1134,3 +1134,69 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 		assert.Equal(t, 180*time.Second, transport.IdleConnTimeout)
 	})
 }
+
+// testRoundTripper is a no-op http.RoundTripper for testing custom transport wiring.
+type testRoundTripper struct{}
+
+func (t *testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK}, nil
+}
+
+func TestCustomTransport(t *testing.T) {
+	t.Run("custom transport is used when provided", func(t *testing.T) {
+		customRT := &testRoundTripper{}
+
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			customTransport: customRT,
+		})
+
+		// The connection's httpClient.Transport should be our custom RoundTripper
+		assert.Same(t, customRT, conn.httpClient.Transport)
+	})
+
+	t.Run("default transport is built when custom transport is nil", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{})
+
+		// Should be the default *http.Transport, not nil
+		_, ok := conn.httpClient.Transport.(*http.Transport)
+		assert.True(t, ok, "expected default *http.Transport when no custom transport provided")
+	})
+
+	t.Run("custom transport bypasses pool settings", func(t *testing.T) {
+		customRT := &testRoundTripper{}
+
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			customTransport: customRT,
+			maxConnsPerHost: 999, // should be ignored
+		})
+
+		// Transport should be the custom one, not an *http.Transport with pool settings
+		assert.Same(t, customRT, conn.httpClient.Transport)
+	})
+
+	t.Run("ClientSettings wires custom transport", func(t *testing.T) {
+		customRT := &testRoundTripper{}
+
+		client, err := NewClient("http://localhost:8182/gremlin",
+			func(settings *ClientSettings) {
+				settings.Transport = customRT
+			})
+		require.NoError(t, err)
+		defer client.Close()
+
+		assert.Same(t, customRT, client.conn.httpClient.Transport)
+	})
+
+	t.Run("DriverRemoteConnectionSettings wires custom transport", func(t *testing.T) {
+		customRT := &testRoundTripper{}
+
+		drc, err := NewDriverRemoteConnection("http://localhost:8182/gremlin",
+			func(settings *DriverRemoteConnectionSettings) {
+				settings.Transport = customRT
+			})
+		require.NoError(t, err)
+		defer drc.Close()
+
+		assert.Same(t, customRT, drc.client.conn.httpClient.Transport)
+	})
+}

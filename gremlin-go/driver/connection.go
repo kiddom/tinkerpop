@@ -95,6 +95,7 @@ type connectionSettings struct {
 	keepAliveInterval        time.Duration
 	enableCompression        bool
 	enableUserAgentOnConnect bool
+	customTransport          http.RoundTripper
 }
 
 // connection handles HTTP request/response for Gremlin queries.
@@ -144,21 +145,26 @@ func newConnection(handler *logHandler, url string, connSettings *connectionSett
 		keepAliveInterval = defaultKeepAliveInterval
 	}
 
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   connectionTimeout,
-			KeepAlive: keepAliveInterval,
-		}).DialContext,
-		TLSClientConfig:     connSettings.tlsConfig,
-		MaxConnsPerHost:     maxConnsPerHost,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-		IdleConnTimeout:     idleConnTimeout,
-		DisableCompression:  !connSettings.enableCompression,
+	var rt http.RoundTripper
+	if connSettings.customTransport != nil {
+		rt = connSettings.customTransport
+	} else {
+		rt = &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   connectionTimeout,
+				KeepAlive: keepAliveInterval,
+			}).DialContext,
+			TLSClientConfig:     connSettings.tlsConfig,
+			MaxConnsPerHost:     maxConnsPerHost,
+			MaxIdleConnsPerHost: maxIdleConnsPerHost,
+			IdleConnTimeout:     idleConnTimeout,
+			DisableCompression:  !connSettings.enableCompression,
+		}
 	}
 
 	return &connection{
 		url:          url,
-		httpClient:   &http.Client{Transport: transport}, // No Timeout - allows streaming
+		httpClient:   &http.Client{Transport: rt}, // No Timeout - allows streaming
 		connSettings: connSettings,
 		logHandler:   handler,
 		serializer:   newGraphBinarySerializer(handler),
