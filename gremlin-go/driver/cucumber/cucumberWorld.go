@@ -25,7 +25,7 @@ import (
 	"reflect"
 	"strconv"
 
-	gremlingo "github.com/apache/tinkerpop/gremlin-go/v3/driver"
+	gremlingo "github.com/kiddom/tinkerpop/gremlin-go/v3/driver"
 	"github.com/cucumber/godog"
 )
 
