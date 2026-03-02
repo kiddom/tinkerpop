@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -92,6 +93,7 @@ type connectionSettings struct {
 	maxConnsPerHost          int
 	maxIdleConnsPerHost      int
 	idleConnTimeout          time.Duration
+	maxConnLifetime          time.Duration
 	keepAliveInterval        time.Duration
 	enableCompression        bool
 	enableUserAgentOnConnect bool
@@ -106,6 +108,9 @@ type connection struct {
 	logHandler   *logHandler
 	serializer   *GraphBinarySerializer
 	interceptors []RequestInterceptor
+	transportMu  sync.RWMutex
+	stopRefresh  chan struct{}
+	stopOnce     sync.Once
 }
 
 // Connection pool defaults aligned with Java driver
@@ -118,50 +123,90 @@ const (
 )
 
 func newConnection(handler *logHandler, url string, connSettings *connectionSettings) *connection {
-	// Apply defaults for zero values
-	connectionTimeout := connSettings.connectionTimeout
+	if connSettings == nil {
+		connSettings = &connectionSettings{}
+	}
+
+	conn := &connection{
+		url:          url,
+		connSettings: connSettings,
+		logHandler:   handler,
+		serializer:   newGraphBinarySerializer(handler),
+	}
+	conn.httpClient = &http.Client{Transport: conn.buildTransport()} // No Timeout - allows streaming
+
+	if connSettings.maxConnLifetime > 0 {
+		conn.stopRefresh = make(chan struct{})
+		go conn.refreshTransportLoop(connSettings.maxConnLifetime)
+	}
+
+	return conn
+}
+
+func (c *connection) buildTransport() *http.Transport {
+	connectionTimeout := c.connSettings.connectionTimeout
 	if connectionTimeout == 0 {
 		connectionTimeout = defaultConnectionTimeout
 	}
 
-	maxConnsPerHost := connSettings.maxConnsPerHost
+	maxConnsPerHost := c.connSettings.maxConnsPerHost
 	if maxConnsPerHost == 0 {
 		maxConnsPerHost = defaultMaxConnsPerHost
 	}
 
-	maxIdleConnsPerHost := connSettings.maxIdleConnsPerHost
+	maxIdleConnsPerHost := c.connSettings.maxIdleConnsPerHost
 	if maxIdleConnsPerHost == 0 {
 		maxIdleConnsPerHost = defaultMaxIdleConnsPerHost
 	}
 
-	idleConnTimeout := connSettings.idleConnTimeout
+	idleConnTimeout := c.connSettings.idleConnTimeout
 	if idleConnTimeout == 0 {
 		idleConnTimeout = defaultIdleConnTimeout
 	}
 
-	keepAliveInterval := connSettings.keepAliveInterval
+	keepAliveInterval := c.connSettings.keepAliveInterval
 	if keepAliveInterval == 0 {
 		keepAliveInterval = defaultKeepAliveInterval
 	}
 
-	transport := &http.Transport{
+	return &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   connectionTimeout,
 			KeepAlive: keepAliveInterval,
 		}).DialContext,
-		TLSClientConfig:     connSettings.tlsConfig,
+		TLSClientConfig:     c.connSettings.tlsConfig,
 		MaxConnsPerHost:     maxConnsPerHost,
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		IdleConnTimeout:     idleConnTimeout,
-		DisableCompression:  !connSettings.enableCompression,
+		DisableCompression:  !c.connSettings.enableCompression,
 	}
+}
 
-	return &connection{
-		url:          url,
-		httpClient:   &http.Client{Transport: transport}, // No Timeout - allows streaming
-		connSettings: connSettings,
-		logHandler:   handler,
-		serializer:   newGraphBinarySerializer(handler),
+func (c *connection) refreshTransportLoop(lifetime time.Duration) {
+	ticker := time.NewTicker(lifetime)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.logHandler.log(Debug, connectionLifetimeRefresh)
+			c.swapTransport()
+		case <-c.stopRefresh:
+			return
+		}
+	}
+}
+
+func (c *connection) swapTransport() {
+	newHTTPClient := &http.Client{Transport: c.buildTransport()} // No Timeout - allows streaming
+
+	c.transportMu.Lock()
+	oldHTTPClient := c.httpClient
+	c.httpClient = newHTTPClient
+	c.transportMu.Unlock()
+
+	if oldHTTPClient != nil {
+		oldHTTPClient.CloseIdleConnections()
 	}
 }
 
@@ -218,7 +263,11 @@ func (c *connection) executeAndStream(data []byte, rs ResultSet) {
 	}
 	req.Header = httpReq.Headers
 
-	resp, err := c.httpClient.Do(req)
+	c.transportMu.RLock()
+	httpClient := c.httpClient
+	c.transportMu.RUnlock()
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		c.logHandler.logf(Error, failedToSendRequest, err.Error())
 		rs.setError(err)
@@ -309,5 +358,17 @@ func (c *connection) streamToResultSet(reader io.Reader, rs ResultSet) {
 }
 
 func (c *connection) close() {
-	c.httpClient.CloseIdleConnections()
+	if c.stopRefresh != nil {
+		c.stopOnce.Do(func() {
+			close(c.stopRefresh)
+		})
+	}
+
+	c.transportMu.RLock()
+	httpClient := c.httpClient
+	c.transportMu.RUnlock()
+
+	if httpClient != nil {
+		httpClient.CloseIdleConnections()
+	}
 }

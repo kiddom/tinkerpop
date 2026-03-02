@@ -1045,6 +1045,37 @@ func TestConnectionPoolSettings(t *testing.T) {
 		assert.Equal(t, 8, transport.MaxIdleConnsPerHost, "MaxIdleConnsPerHost should default to 8")
 		assert.Equal(t, 180*time.Second, transport.IdleConnTimeout, "IdleConnTimeout should default to 180s")
 	})
+
+	t.Run("max connection lifetime is disabled by default", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{})
+		assert.Nil(t, conn.stopRefresh)
+	})
+
+	t.Run("max connection lifetime starts refresh loop when configured", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			maxConnLifetime: 100 * time.Millisecond,
+		})
+		require.NotNil(t, conn.stopRefresh)
+		conn.close()
+	})
+
+	t.Run("transport is replaced after max connection lifetime elapses", func(t *testing.T) {
+		conn := newConnection(newTestLogHandler(), "http://localhost:8182/gremlin", &connectionSettings{
+			maxConnLifetime: 50 * time.Millisecond,
+		})
+		defer conn.close()
+
+		originalTransport := conn.httpClient.Transport
+
+		// Wait for at least one refresh cycle
+		time.Sleep(120 * time.Millisecond)
+
+		conn.transportMu.RLock()
+		newTransport := conn.httpClient.Transport
+		conn.transportMu.RUnlock()
+
+		assert.NotSame(t, originalTransport, newTransport, "transport should be replaced after lifetime elapses")
+	})
 }
 
 func TestClientSettingsWiring(t *testing.T) {
@@ -1055,6 +1086,7 @@ func TestClientSettingsWiring(t *testing.T) {
 				settings.MaxIdleConnections = 20
 				settings.IdleConnectionTimeout = 240 * time.Second
 				settings.KeepAliveInterval = 45 * time.Second
+				settings.MaxConnectionLifetime = 3 * time.Minute
 			})
 		require.NoError(t, err)
 		defer client.Close()
@@ -1064,12 +1096,22 @@ func TestClientSettingsWiring(t *testing.T) {
 		assert.Equal(t, 20, client.connectionSettings.maxIdleConnsPerHost)
 		assert.Equal(t, 240*time.Second, client.connectionSettings.idleConnTimeout)
 		assert.Equal(t, 45*time.Second, client.connectionSettings.keepAliveInterval)
+		assert.Equal(t, 3*time.Minute, client.connectionSettings.maxConnLifetime)
 
 		// Verify settings were applied to http.Transport
 		transport := client.conn.httpClient.Transport.(*http.Transport)
 		assert.Equal(t, 200, transport.MaxConnsPerHost)
 		assert.Equal(t, 20, transport.MaxIdleConnsPerHost)
 		assert.Equal(t, 240*time.Second, transport.IdleConnTimeout)
+	})
+
+	t.Run("MaxConnectionLifetime defaults to disabled", func(t *testing.T) {
+		client, err := NewClient("http://localhost:8182/gremlin")
+		require.NoError(t, err)
+		defer client.Close()
+
+		assert.Equal(t, time.Duration(0), client.connectionSettings.maxConnLifetime)
+		assert.Nil(t, client.conn.stopRefresh)
 	})
 
 	t.Run("ClientSettings uses defaults when not configured", func(t *testing.T) {
@@ -1099,6 +1141,7 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 				settings.MaxIdleConnections = 15
 				settings.IdleConnectionTimeout = 200 * time.Second
 				settings.KeepAliveInterval = 40 * time.Second
+				settings.MaxConnectionLifetime = 5 * time.Minute
 			})
 		require.NoError(t, err)
 		defer drc.Close()
@@ -1108,12 +1151,22 @@ func TestDriverRemoteConnectionSettingsWiring(t *testing.T) {
 		assert.Equal(t, 15, drc.client.connectionSettings.maxIdleConnsPerHost)
 		assert.Equal(t, 200*time.Second, drc.client.connectionSettings.idleConnTimeout)
 		assert.Equal(t, 40*time.Second, drc.client.connectionSettings.keepAliveInterval)
+		assert.Equal(t, 5*time.Minute, drc.client.connectionSettings.maxConnLifetime)
 
 		// Verify settings were applied to http.Transport
 		transport := drc.client.conn.httpClient.Transport.(*http.Transport)
 		assert.Equal(t, 150, transport.MaxConnsPerHost)
 		assert.Equal(t, 15, transport.MaxIdleConnsPerHost)
 		assert.Equal(t, 200*time.Second, transport.IdleConnTimeout)
+	})
+
+	t.Run("MaxConnectionLifetime defaults to disabled", func(t *testing.T) {
+		drc, err := NewDriverRemoteConnection("http://localhost:8182/gremlin")
+		require.NoError(t, err)
+		defer drc.Close()
+
+		assert.Equal(t, time.Duration(0), drc.client.connectionSettings.maxConnLifetime)
+		assert.Nil(t, drc.client.conn.stopRefresh)
 	})
 
 	t.Run("DriverRemoteConnectionSettings uses defaults when not configured", func(t *testing.T) {
