@@ -21,6 +21,7 @@ package gremlingo
 
 import (
 	"sync"
+	"time"
 )
 
 type connectionPool interface {
@@ -43,6 +44,7 @@ type loadBalancingPool struct {
 	connSettings *connectionSettings
 
 	newConnectionThreshold int
+	maxConnLifetime        time.Duration
 	connections            []*connection
 	loadBalanceLock        sync.Mutex
 	isClosed               bool
@@ -100,12 +102,24 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 	validConnections := make([]*connection, 0, cap(pool.connections))
 	for _, connection := range pool.connections {
 		if connection.state == established || connection.state == initialized {
-			validConnections = append(validConnections, connection)
-		}
-		if connection.state == established {
-			// Set the least used connection.
-			if leastUsed == nil || connection.activeResults() < leastUsed.activeResults() {
-				leastUsed = connection
+			if connection.isExpired(pool.maxConnLifetime) {
+				if connection.activeResults() == 0 {
+					// Expired and idle: close it now, exclude from pool.
+					pool.logHandler.log(Info, connectionExpired)
+					connection.close()
+				} else {
+					// Expired but has in-flight requests: keep alive so responses can arrive,
+					// but do not select for new work.
+					validConnections = append(validConnections, connection)
+				}
+			} else {
+				validConnections = append(validConnections, connection)
+				if connection.state == established {
+					// Set the least used connection.
+					if leastUsed == nil || connection.activeResults() < leastUsed.activeResults() {
+						leastUsed = connection
+					}
+				}
 			}
 		}
 	}
@@ -137,7 +151,8 @@ func (pool *loadBalancingPool) getLeastUsedConnection() (*connection, error) {
 }
 
 func newLoadBalancingPool(url string, logHandler *logHandler, connSettings *connectionSettings,
-	newConnectionThreshold int, maximumConcurrentConnections int, initialConcurrentConnections int) (connectionPool, error) {
+	newConnectionThreshold int, maximumConcurrentConnections int, initialConcurrentConnections int,
+	maxConnLifetime time.Duration) (connectionPool, error) {
 	var wg sync.WaitGroup
 	wg.Add(initialConcurrentConnections)
 	var appendLock sync.Mutex
@@ -170,6 +185,7 @@ func newLoadBalancingPool(url string, logHandler *logHandler, connSettings *conn
 		logHandler:             logHandler,
 		connSettings:           connSettings,
 		newConnectionThreshold: newConnectionThreshold,
+		maxConnLifetime:        maxConnLifetime,
 		connections:            pool,
 	}, nil
 }

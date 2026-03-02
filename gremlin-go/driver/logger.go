@@ -127,4 +127,5 @@ const (
 	poolNewConnectionError       errorKey = "POOL_NEW_CONNECTION_ERROR"
 	sessionDetected              errorKey = "SESSION_DETECTED"
 	poolInitialExceedsMaximum    errorKey = "POOL_INITIAL_EXCEEDS_MAXIMUM"
+	connectionExpired            errorKey = "CONNECTION_EXPIRED"
 )

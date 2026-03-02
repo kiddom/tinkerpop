@@ -39,6 +39,7 @@ type connection struct {
 	protocol   protocol
 	results    *synchronizedMap
 	state      connectionState
+	createdAt  time.Time
 }
 
 type connectionSettings struct {
@@ -100,12 +101,20 @@ func (connection *connection) activeResults() int {
 //	established: connection has established communication established with the server
 //	closed: connection was closed by the user.
 //	closedDueToError: connection was closed internally due to an error.
+func (connection *connection) isExpired(maxLifetime time.Duration) bool {
+	if maxLifetime <= 0 {
+		return false
+	}
+	return time.Since(connection.createdAt) > maxLifetime
+}
+
 func createConnection(url string, logHandler *logHandler, connSettings *connectionSettings) (*connection, error) {
 	conn := &connection{
-		logHandler,
-		nil,
-		&synchronizedMap{map[string]ResultSet{}, sync.Mutex{}},
-		initialized,
+		logHandler: logHandler,
+		protocol:   nil,
+		results:    &synchronizedMap{map[string]ResultSet{}, sync.Mutex{}},
+		state:      initialized,
+		createdAt:  time.Now(),
 	}
 	logHandler.log(Info, connectConnection)
 	protocol, err := newGremlinServerWSProtocol(logHandler, Gorilla, url, connSettings, conn.results, conn.errorCallback)

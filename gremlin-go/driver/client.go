@@ -51,6 +51,10 @@ type ClientSettings struct {
 	// Initial amount of instantiated connections. Default: 1
 	InitialConcurrentConnections int
 	EnableUserAgentOnConnect     bool
+	// MaxConnectionLifetime is the maximum duration a connection can be reused before being
+	// drained and replaced. Expired connections finish in-flight requests before closing.
+	// Default: 0 (disabled — connections live forever).
+	MaxConnectionLifetime time.Duration
 }
 
 // Client is used to connect and interact with a Gremlin-supported server.
@@ -111,7 +115,8 @@ func NewClient(url string, configurations ...func(settings *ClientSettings)) (*C
 		settings.InitialConcurrentConnections = settings.MaximumConcurrentConnections
 	}
 	pool, err := newLoadBalancingPool(url, logHandler, connSettings, settings.NewConnectionThreshold,
-		settings.MaximumConcurrentConnections, settings.InitialConcurrentConnections)
+		settings.MaximumConcurrentConnections, settings.InitialConcurrentConnections,
+		settings.MaxConnectionLifetime)
 	if err != nil {
 		if err != nil {
 			logHandler.logf(Error, logErrorGeneric, "NewClient", err.Error())

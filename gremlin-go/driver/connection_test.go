@@ -462,7 +462,7 @@ func TestConnection(t *testing.T) {
 		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
 		newPoolSize := 2
 		pool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
-			newDefaultConnectionSettings(), 4, 4, newPoolSize)
+			newDefaultConnectionSettings(), 4, 4, newPoolSize, 0)
 		assert.Nil(t, err)
 		defer pool.close()
 		assert.Len(t, pool.(*loadBalancingPool).connections, newPoolSize)
@@ -472,7 +472,7 @@ func TestConnection(t *testing.T) {
 		newPoolSize := 0
 		skipTestsIfNotEnabled(t, integrationTestSuiteName, testNoAuthEnable)
 		pool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
-			newDefaultConnectionSettings(), 4, 4, newPoolSize)
+			newDefaultConnectionSettings(), 4, 4, newPoolSize, 0)
 		assert.Nil(t, err)
 		defer pool.close()
 		lhp := pool.(*loadBalancingPool)
@@ -499,7 +499,7 @@ func TestConnection(t *testing.T) {
 		t.Run("pool is empty", func(t *testing.T) {
 			pool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 				newDefaultConnectionSettings(),
-				newConnectionThreshold, maximumConcurrentConnections, 0)
+				newConnectionThreshold, maximumConcurrentConnections, 0, 0)
 			assert.Nil(t, err)
 			lbp := pool.(*loadBalancingPool)
 			defer lbp.close()
@@ -512,7 +512,7 @@ func TestConnection(t *testing.T) {
 		t.Run("newConcurrentThreshold reached with capacity remaining", func(t *testing.T) {
 			pool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 				newDefaultConnectionSettings(),
-				newConnectionThreshold, maximumConcurrentConnections, 0)
+				newConnectionThreshold, maximumConcurrentConnections, 0, 0)
 			assert.Nil(t, err)
 			lbp := pool.(*loadBalancingPool)
 			defer lbp.close()
@@ -541,7 +541,7 @@ func TestConnection(t *testing.T) {
 		t.Run("newConcurrentThreshold reached with no capacity remaining", func(t *testing.T) {
 			capacityFullConnectionPool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info,
 				language.English), newDefaultConnectionSettings(),
-				1, 1, 1)
+				1, 1, 1, 0)
 			assert.Nil(t, err)
 			assert.NotNil(t, capacityFullConnectionPool)
 			capacityFullLbp := capacityFullConnectionPool.(*loadBalancingPool)
@@ -557,7 +557,7 @@ func TestConnection(t *testing.T) {
 		t.Run("all connections in pool invalid", func(t *testing.T) {
 			pool, err := newLoadBalancingPool(testNoAuthUrl, newLogHandler(&defaultLogger{}, Info, language.English),
 				newDefaultConnectionSettings(),
-				newConnectionThreshold, maximumConcurrentConnections, 0)
+				newConnectionThreshold, maximumConcurrentConnections, 0, 0)
 			assert.Nil(t, err)
 			lbp := pool.(*loadBalancingPool)
 			defer lbp.close()
@@ -1321,4 +1321,125 @@ func TestConnection(t *testing.T) {
 			assert.Greater(t, len(props), 0)
 		}
 	})
+}
+
+// Unit tests for MaxConnectionLifetime feature
+
+func makeTestLogHandlerLifetime() *logHandler {
+	return newLogHandler(&defaultLogger{}, Warning, language.English)
+}
+
+func makeTestConnection(state connectionState, createdAt time.Time) *connection {
+	return &connection{
+		logHandler: makeTestLogHandlerLifetime(),
+		protocol:   nil,
+		results:    &synchronizedMap{internalMap: map[string]ResultSet{}, syncLock: sync.Mutex{}},
+		state:      state,
+		createdAt:  createdAt,
+	}
+}
+
+func makeTestConnectionWithResults(state connectionState, createdAt time.Time, numResults int) *connection {
+	results := &synchronizedMap{internalMap: map[string]ResultSet{}, syncLock: sync.Mutex{}}
+	for i := 0; i < numResults; i++ {
+		key := strconv.Itoa(i)
+		results.internalMap[key] = newChannelResultSet(key, results)
+	}
+	return &connection{
+		logHandler: makeTestLogHandlerLifetime(),
+		protocol:   nil,
+		results:    results,
+		state:      state,
+		createdAt:  createdAt,
+	}
+}
+
+func TestConnectionIsExpired(t *testing.T) {
+	t.Run("returns false when maxLifetime is 0 (disabled)", func(t *testing.T) {
+		conn := makeTestConnection(established, time.Now().Add(-24*time.Hour))
+		assert.False(t, conn.isExpired(0))
+	})
+
+	t.Run("returns false for fresh connection within lifetime", func(t *testing.T) {
+		conn := makeTestConnection(established, time.Now())
+		assert.False(t, conn.isExpired(1*time.Hour))
+	})
+
+	t.Run("returns true after lifetime has elapsed", func(t *testing.T) {
+		conn := makeTestConnection(established, time.Now().Add(-2*time.Millisecond))
+		assert.True(t, conn.isExpired(1*time.Millisecond))
+	})
+}
+
+func TestExpiredIdleConnectionClosed(t *testing.T) {
+	oldTime := time.Now().Add(-1 * time.Second)
+	expiredIdle := makeTestConnection(established, oldTime)
+	fresh := makeTestConnection(established, time.Now())
+
+	conns := make([]*connection, 0, 4)
+	conns = append(conns, expiredIdle, fresh)
+
+	pool := &loadBalancingPool{
+		url:                    "ws://localhost:8182/gremlin",
+		logHandler:             makeTestLogHandlerLifetime(),
+		connSettings:           &connectionSettings{},
+		newConnectionThreshold: defaultNewConnectionThreshold,
+		maxConnLifetime:        500 * time.Millisecond,
+		connections:            conns,
+	}
+
+	result, err := pool.getLeastUsedConnection()
+
+	assert.NoError(t, err)
+	assert.Equal(t, fresh, result, "should select the fresh connection")
+	assert.Equal(t, closed, expiredIdle.state, "expired idle connection should be closed")
+	assert.Equal(t, 1, len(pool.connections), "expired connection should be removed from pool")
+	assert.Equal(t, fresh, pool.connections[0], "remaining connection should be the fresh one")
+}
+
+func TestExpiredBusyConnectionKeptButNotSelected(t *testing.T) {
+	oldTime := time.Now().Add(-1 * time.Second)
+	expiredBusy := makeTestConnectionWithResults(established, oldTime, 2)
+	fresh := makeTestConnection(established, time.Now())
+
+	conns := make([]*connection, 0, 4)
+	conns = append(conns, expiredBusy, fresh)
+
+	pool := &loadBalancingPool{
+		url:                    "ws://localhost:8182/gremlin",
+		logHandler:             makeTestLogHandlerLifetime(),
+		connSettings:           &connectionSettings{},
+		newConnectionThreshold: defaultNewConnectionThreshold,
+		maxConnLifetime:        500 * time.Millisecond,
+		connections:            conns,
+	}
+
+	result, err := pool.getLeastUsedConnection()
+
+	assert.NoError(t, err)
+	assert.Equal(t, fresh, result, "should select the fresh connection, not the expired+busy one")
+	assert.Equal(t, established, expiredBusy.state, "expired busy connection should remain established")
+	assert.Equal(t, 2, len(pool.connections), "expired busy connection should remain in pool")
+}
+
+func TestMaxConnectionLifetimeClientSettingsWiring(t *testing.T) {
+	settings := &ClientSettings{MaxConnectionLifetime: 5 * time.Minute}
+
+	// Verify the field flows from ClientSettings into loadBalancingPool
+	pool := &loadBalancingPool{maxConnLifetime: settings.MaxConnectionLifetime}
+	assert.Equal(t, 5*time.Minute, pool.maxConnLifetime)
+}
+
+func TestMaxConnectionLifetimeDefaultIsZero(t *testing.T) {
+	// Default ClientSettings should have MaxConnectionLifetime == 0 (disabled)
+	settings := &ClientSettings{}
+	assert.Equal(t, time.Duration(0), settings.MaxConnectionLifetime)
+}
+
+func TestMaxConnectionLifetimeDriverRemoteConnectionSettingsWiring(t *testing.T) {
+	settings := &DriverRemoteConnectionSettings{MaxConnectionLifetime: 3 * time.Minute}
+
+	// Verify the field flows from DriverRemoteConnectionSettings into loadBalancingPool
+	pool := &loadBalancingPool{maxConnLifetime: settings.MaxConnectionLifetime}
+	assert.Equal(t, 3*time.Minute, pool.maxConnLifetime)
 }

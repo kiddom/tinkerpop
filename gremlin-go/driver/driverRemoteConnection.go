@@ -53,6 +53,10 @@ type DriverRemoteConnectionSettings struct {
 	MaximumConcurrentConnections int
 	// Initial amount of instantiated connections. Default: 1
 	InitialConcurrentConnections int
+	// MaxConnectionLifetime is the maximum duration a connection can be reused before being
+	// drained and replaced. Expired connections finish in-flight requests before closing.
+	// Default: 0 (disabled — connections live forever).
+	MaxConnectionLifetime time.Duration
 }
 
 // DriverRemoteConnection is a remote connection.
@@ -120,7 +124,8 @@ func NewDriverRemoteConnection(
 		settings.InitialConcurrentConnections = settings.MaximumConcurrentConnections
 	}
 	pool, err := newLoadBalancingPool(url, logHandler, connSettings, settings.NewConnectionThreshold,
-		settings.MaximumConcurrentConnections, settings.InitialConcurrentConnections)
+		settings.MaximumConcurrentConnections, settings.InitialConcurrentConnections,
+		settings.MaxConnectionLifetime)
 	if err != nil {
 		if err != nil {
 			logHandler.logf(Error, logErrorGeneric, "NewDriverRemoteConnection", err.Error())
@@ -218,6 +223,7 @@ func (driver *DriverRemoteConnection) CreateSession(sessionId ...string) (*Drive
 		settings.ReadBufferSize = driver.settings.ReadBufferSize
 		settings.WriteBufferSize = driver.settings.WriteBufferSize
 		settings.MaximumConcurrentConnections = driver.settings.MaximumConcurrentConnections
+		settings.MaxConnectionLifetime = driver.settings.MaxConnectionLifetime
 	})
 	if err != nil {
 		return nil, err
