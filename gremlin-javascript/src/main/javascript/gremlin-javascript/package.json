@@ -30,11 +30,11 @@
     "buffer": "^6.0.3",
     "eventemitter3": "^5.0.1",
     "readable-stream": "^4.5.2",
-    "uuid": "^9.0.1",
+    "uuid": "^14.0.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
-    "@cucumber/cucumber": "^10.3.1",
+    "@cucumber/cucumber": "^12.8.1",
     "@knighted/duel": "^1.0.7",
     "@tsconfig/node18": "^18.2.2",
     "@types/readable-stream": "^4.0.10",
